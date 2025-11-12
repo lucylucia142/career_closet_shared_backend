@@ -1,0 +1,31 @@
+{
+  "name": "newbackend",
+  "version": "1.0.0",
+  "description": "This is api automation framework",
+  "main": "another.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "api",
+    "automation",
+    "axios",
+    "mocha",
+    "chai",
+    "javascript"
+  ],
+  "author": "Lucia Kilele",
+  "license": "ISC",
+  "dependencies": {
+    "@faker-js/faker": "^10.1.0",
+    "axios": "^1.12.2",
+    "chai": "^6.2.0",
+    "mocha": "^11.7.4",
+    "mochawesome": "^7.1.4",
+    "properties-reader": "^2.3.0",
+    "rimraf": "^6.0.1"
+  }
+}
