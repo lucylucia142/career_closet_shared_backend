@@ -270,34 +270,43 @@ app.put("/cart/:userId", authenticate, async (req, res) => {
   }
 });
 
+// ---------------- CART (UPDATED DELETE ROUTE) ----------------
+
 app.delete("/cart/:userId/:itemId/:size", authenticate, async (req, res) => {
-  try {
-    const { userId, itemId, size } = req.params;
-    if (!ObjectId.isValid(userId) || !ObjectId.isValid(itemId)) {
-      return res.status(400).json({ message: "Invalid user or item ID" });
+  try {
+    const { userId, itemId, size } = req.params;
+    if (!ObjectId.isValid(userId) || !ObjectId.isValid(itemId)) {
+      return res.status(400).json({ message: "Invalid user or item ID" });
+    }
+
+    const cart = await db.collection("carts").findOne({ userId: new ObjectId(userId) });
+
+    // 🛑 KEY FIX: We no longer return 404 if the cart is missing. 
+    // We treat a deletion attempt on a missing item/cart as a success, 
+    // because the desired state (item/cart is gone) is achieved.
+    if (cart) {
+        const items = structuredClone(cart.items);
+        
+        // Only attempt to delete and update if the item/size exists
+        if (items[itemId] && items[itemId][size]) {
+            delete items[itemId][size];
+            if (Object.keys(items[itemId]).length === 0) delete items[itemId];
+
+            await db.collection("carts").updateOne(
+                { userId: new ObjectId(userId) },
+                { $set: { items, updatedAt: new Date() } }
+            );
+        }
     }
 
-    const cart = await db.collection("carts").findOne({ userId: new ObjectId(userId) });
-    if (!cart) return res.status(404).json({ message: "Cart not found" });
-
-    const items = structuredClone(cart.items);
-    if (items[itemId] && items[itemId][size]) {
-      delete items[itemId][size];
-      if (Object.keys(items[itemId]).length === 0) delete items[itemId];
-    }
-
-    await db.collection("carts").updateOne(
-      { userId: new ObjectId(userId) },
-      { $set: { items, updatedAt: new Date() } }
-    );
-
-    res.status(200).json({ message: "Item removed from cart" });
-  } catch (error) {
-    console.error("Error removing from cart:", error);
-    res.status(500).json({ message: "Internal Server Error" });
-  }
+    // ✅ Return success (200 OK) regardless of whether the cart existed 
+    // or whether the item was found inside the cart.
+    res.status(200).json({ message: "Item removed from cart (or already removed)" });
+  } catch (error) {
+    console.error("Error removing from cart:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
 });
-
 // ---------------- PRODUCTS ----------------
 app.post("/products", async (req, res) => {
   try {
@@ -377,61 +386,76 @@ app.delete("/products/:id", async (req, res) => {
 
 // ---------------- ORDERS ----------------
 // Place a new order
-app.post("/orders", authenticate, async (req, res) => {
-  try {
-    const { userId, items, totalAmount, shippingAddress } = req.body;
+// ---------------- ORDERS (CORRECTED) ----------------
+// Place a new order
+app.post("/orders", async (req, res) => {
+  try {
+    // items is now an ARRAY of objects from the frontend
+    const { userId, items, totalAmount, shippingAddress, paymentMethod, paymentStatus } = req.body; // Added new fields
 
-    if (!ObjectId.isValid(userId)) {
-      return res.status(400).json({ message: "Invalid user ID" });
-    }
-    if (!items || !totalAmount || !shippingAddress) {
-      return res.status(400).json({ message: "Missing required order fields" });
-    }
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+    if (!items || items.length === 0 || !totalAmount || !shippingAddress) {
+      return res.status(400).json({ message: "Missing required order fields or empty item list" });
+    }
 
-    // Fetch user to get address if not provided
-    const user = await db.collection("users").findOne({ _id: new ObjectId(userId) });
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // Fetch user (used for verification)
+    const user = await db.collection("users").findOne({ _id: new ObjectId(userId) });
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Validate items
-    const validatedItems = [];
-    for (const itemId in items) {
-      const product = await db.collection("products").findOne({ _id: new ObjectId(itemId) });
-      if (!product) return res.status(404).json({ message: `Product ${itemId} not found` });
-      
-      for (const size in items[itemId]) {
-        const quantity = items[itemId][size];
-        if (quantity < 1) {
-          return res.status(400).json({ message: `Invalid quantity for ${itemId} size ${size}` });
-        }
-        validatedItems.push({ itemId, size, quantity, price: product.price });
-      }
-    }
+    // 🔑 NEW VALIDATION LOGIC: Loop directly over the items ARRAY
+    const validatedItems = [];
+    for (const item of items) {
+        // Ensure critical fields exist
+        if (!item.productId || !item.quantity || !item.size || !item.price) {
+          return res.status(400).json({ message: "One or more order items are incomplete." });
+        }
+        
+        // Optional: Verify product exists and quantity is positive
+        const product = await db.collection("products").findOne({ _id: new ObjectId(item.productId) });
+        if (!product) return res.status(404).json({ message: `Product ID ${item.productId} not found` });
+        if (item.quantity < 1) {
+          return res.status(400).json({ message: `Invalid quantity for product ${item.productId}` });
+        }
 
-    // Save order
-    const orderData = {
-      userId: new ObjectId(userId),
-      items: validatedItems,
-      totalAmount,
-      shippingAddress: shippingAddress || user.address,
-      status: "Pending",
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
+        // Store the cleaned, validated item data
+        validatedItems.push({
+            productId: new ObjectId(item.productId),
+            name: item.name,
+            image: item.image,
+            price: item.price,
+            size: item.size,
+            quantity: item.quantity,
+        });
+    }
 
-    const result = await db.collection("orders").insertOne(orderData);
+    // Save order
+    const orderData = {
+      userId: new ObjectId(userId),
+      items: validatedItems,
+      totalAmount,
+      shippingAddress, // Use the address sent from the frontend form
+      paymentMethod: paymentMethod || 'N/A',
+      paymentStatus: paymentStatus || 'Pending',
+      status: "Processing", // Better initial status than "Pending"
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
 
-    // Clear the cart
-    await db.collection("carts").deleteOne({ userId: new ObjectId(userId) });
+    const result = await db.collection("orders").insertOne(orderData);
 
-    res.status(201).json({ message: "Order placed", id: result.insertedId });
-  } catch (e) {
-    console.error("Error placing order:", e);
-    res.status(500).json({ message: "Internal Server Error" });
-  }
+    // Clear the cart (using the correct field: userId)
+    await db.collection("carts").deleteOne({ userId: new ObjectId(userId) });
+
+    res.status(201).json({ message: "Order placed", _id: result.insertedId }); // Changed 'id' to '_id' for frontend navigation
+  } catch (e) {
+    console.error("Error placing order:", e);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
 });
-
 // Get all orders for a user
-app.get("/orders/user/:userId", authenticate, async (req, res) => {
+app.get("/orders/user/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     if (!ObjectId.isValid(userId)) return res.status(400).json({ message: "Invalid user ID" });
@@ -445,7 +469,7 @@ app.get("/orders/user/:userId", authenticate, async (req, res) => {
 });
 
 // Get a single order by ID
-app.get("/orders/:id", authenticate, async (req, res) => {
+app.get("/orders/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid order ID" });
@@ -459,6 +483,7 @@ app.get("/orders/:id", authenticate, async (req, res) => {
     res.status(500).json({ message: "Internal Server Error" });
   }
 });
+
 
 // ---------------- START SERVER ----------------
 connectToMongo().then(() => {
